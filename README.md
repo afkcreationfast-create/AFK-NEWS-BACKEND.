@@ -1,33 +1,36 @@
-# AFK News — Backend API
+# AFK News Backend v2
 
-## GitHub puis Render
-1. Décompresse ce ZIP.
-2. Crée un dépôt GitHub vide nommé `AFK-NEWS-BACKEND`.
-3. Envoie **le contenu du dossier** à la racine du dépôt (`server.js`, `package.json`, etc.).
-4. Dans Render, crée un **Web Service** et connecte ce dépôt.
-5. Build Command : `npm install`
-6. Start Command : `npm start`
-7. Dans Render > Environment, ajoute `DATABASE_URL` avec l'URI Session Pooler Supabase (port 5432).
+## Déploiement Render
+1. Remplacer les fichiers du dépôt `AFK-NEWS-BACKEND` par `server.js`, `package.json`, `.env.example`, `.gitignore` et ce README.
+2. Commit/push sur `main`. Dans Render, conserver le Web Service existant, Build Command `npm install`, Start Command `npm start`.
+3. Render > Environment : ajouter les variables ci-dessous. Ne jamais pousser les valeurs privées sur GitHub.
 
-Variables optionnelles Render :
-- `NEWSAPI_KEY`
-- `GNEWS_API_KEY`
-- `NEWS_REFRESH_MINUTES` = `30`
-- `NEWS_COUNTRY` = `us`
-- `ADMIN_REFRESH_TOKEN` = secret privé choisi par toi.
+### Variables obligatoires
+- `DATABASE_URL` : URI PostgreSQL Supabase (Session Pooler conseillé).
+- `JWT_SECRET` : secret aléatoire long (64 caractères ou plus).
+- `FRONTEND_URL` : URL exacte du site frontend Render. Plusieurs origines possibles séparées par des virgules.
+- `ADMIN_EMAIL` et `ADMIN_PASSWORD` : identifiants du compte administrateur, stockés uniquement dans Render.
 
-Ne publie jamais `.env`, mot de passe PostgreSQL ou clés API sur GitHub. Les clés précédemment exposées doivent être révoquées et remplacées. Vérifie les quotas et licences du fournisseur avant usage public/commercial.
+### Actualités
+- `NEWSAPI_KEY` et/ou `GNEWS_API_KEY` : au moins une clé fournisseur pour alimenter le flux.
+- `NEWS_COUNTRY=us` et `GNEWS_LANGUAGE=en` sont les réglages actuels par défaut. Cela ne garantit pas un flux consacré à Haïti.
+- `NEWS_REFRESH_MINUTES=30` (minimum 15). Sur Render gratuit, la collecte programmée s'arrête lorsque le service dort.
+
+### Email SpaceMail (newsletter)
+- `SMTP_HOST=mail.spacemail.com`
+- `SMTP_PORT=465`
+- `SMTP_SECURE=true`
+- `SMTP_USER` : adresse complète de la boîte mail.
+- `SMTP_PASS` : mot de passe de la boîte, uniquement dans Render.
+- `MAIL_FROM` : même adresse autorisée par SpaceMail.
 
 ## Routes
-- `GET /` statut API
-- `GET /api/health` test connexion Supabase
-- `GET /api/categories`
-- `GET /api/articles?page=1&limit=12`
-- `GET /api/articles?category=technologie`
-- `GET /api/articles?q=climat`
-- `GET /api/announcements`
-- `POST /api/admin/refresh-news` avec en-tête `x-admin-token`
+- `GET /`, `GET /api/health`, `GET /api/categories`, `GET /api/articles`, `GET /api/announcements`
+- `POST /api/auth/register` `{name,email,password}`
+- `POST /api/auth/login` `{email,password}` ; retourne un JWT
+- `GET /api/auth/me` avec `Authorization: Bearer TOKEN`
+- `GET /api/favorites`, `POST /api/favorites/:articleId`, `DELETE /api/favorites/:articleId`
+- `POST /api/newsletter` `{email}` ; l'inscription est enregistrée même si SMTP n'est pas configuré, mais l'email de bienvenue ne partira pas.
+- Admin : `POST /api/admin/refresh-news`, `GET /api/admin/stats`, `POST /api/admin/announcements`, `DELETE /api/admin/announcements/:id`, avec `Authorization: Bearer TOKEN` d'un compte admin.
 
-Les tables PostgreSQL et catégories sont créées automatiquement au premier démarrage si elles n'existent pas. Cette version expose les titres, résumés, métadonnées et liens fournis par les sources, pas les articles complets.
-
-Attention : sur une offre Render qui met le service en veille, le minuteur ne tourne pas pendant la veille. Pour une collecte garantie toutes les 30 minutes, le serveur doit rester actif ou il faudra utiliser un cron externe.
+Les tables sont créées automatiquement au démarrage. L'interface frontend doit encore appeler ces routes pour rendre les boutons compte/favoris/newsletter pleinement utilisables. Le backend seul ne transforme pas automatiquement les boutons de démonstration du HTML.

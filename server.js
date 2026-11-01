@@ -1,168 +1,64 @@
-const express = require("express");
-const cors = require("cors");
-const helmet = require("helmet");
-const { Pool } = require("pg");
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const { Pool } = require('pg');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const nodemailer = require('nodemailer');
+const rateLimit = require('express-rate-limit');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL && !process.env.DATABASE_URL.includes("localhost")
-    ? { rejectUnauthorized: false } : false,
-  max: 5, connectionTimeoutMillis: 10000
-});
-app.use(helmet());
-app.use(cors());
-app.use(express.json({limit:"1mb"}));
-
-const categoryNames = ["Alertes","Haïti","Monde","Loisirs & culture","Sports","Technologie","Économie","Sciences"];
-
-async function initDb() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS categories (
-      id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL UNIQUE, slug TEXT UNIQUE,
-      created_at TIMESTAMPTZ DEFAULT NOW()
-    );
-    CREATE TABLE IF NOT EXISTS articles (
-      id BIGSERIAL PRIMARY KEY, external_id TEXT NOT NULL, title TEXT NOT NULL,
-      summary TEXT, content TEXT, url TEXT NOT NULL, image_url TEXT, source TEXT NOT NULL,
-      original_language TEXT DEFAULT 'en', translated_title TEXT, translated_summary TEXT,
-      category_id BIGINT REFERENCES categories(id), country TEXT,
-      importance INTEGER DEFAULT 3 CHECK (importance BETWEEN 1 AND 5),
-      is_published BOOLEAN DEFAULT TRUE, published_at TIMESTAMPTZ,
-      fetched_at TIMESTAMPTZ DEFAULT NOW(), created_at TIMESTAMPTZ DEFAULT NOW(),
-      UNIQUE(source,external_id)
-    );
-    CREATE TABLE IF NOT EXISTS afk_announcements (
-      id BIGSERIAL PRIMARY KEY, title TEXT NOT NULL, description TEXT, image_url TEXT,
-      link_url TEXT, announcement_type TEXT DEFAULT 'news', is_published BOOLEAN DEFAULT FALSE,
-      published_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT NOW(),
-      updated_at TIMESTAMPTZ DEFAULT NOW()
-    );
-    CREATE TABLE IF NOT EXISTS refresh_logs (
-      id BIGSERIAL PRIMARY KEY, service TEXT NOT NULL, status TEXT NOT NULL,
-      articles_found INTEGER DEFAULT 0, articles_added INTEGER DEFAULT 0,
-      error_message TEXT, started_at TIMESTAMPTZ DEFAULT NOW(), finished_at TIMESTAMPTZ
-    );
-  `);
-  for (const name of categoryNames) {
-    const slug = name.normalize("NFD").replace(/[\\u0300-\\u036f]/g,"")
-      .toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"");
-    await pool.query(`INSERT INTO categories(name,slug) VALUES($1,$2)
-      ON CONFLICT(name) DO UPDATE SET slug=EXCLUDED.slug`,[name,slug]);
-  }
+const DATABASE_URL = process.env.DATABASE_URL;
+if (!DATABASE_URL) { console.error('DATABASE_URL manquant'); process.exit(1); }
+if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) { console.error('JWT_SECRET doit contenir au moins 32 caractères'); process.exit(1); }
+const pool = new Pool({ connectionString: DATABASE_URL, ssl: /localhost|127\.0\.0\.1/.test(DATABASE_URL) ? false : { rejectUnauthorized: false }, max: 5, connectionTimeoutMillis: 12000, idleTimeoutMillis: 30000 });
+const allowedOrigins = (process.env.FRONTEND_URL || '').split(',').map(x => x.trim()).filter(Boolean);
+app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
+app.use(cors({ origin(origin, cb) { if (!origin || !allowedOrigins.length || allowedOrigins.includes(origin)) return cb(null, true); return cb(new Error('Origine non autorisée par CORS')); } }));
+app.use(express.json({ limit: '1mb' }));
+app.use('/api/auth', rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false }));
+app.use('/api/newsletter', rateLimit({ windowMs: 60 * 60 * 1000, limit: 8, standardHeaders: true, legacyHeaders: false }));
+const categories = ['Alertes','Haïti','Monde','Loisirs & culture','Sports','Technologie','Économie','Sciences'];
+const slug = s => s.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
+const clean = (v, n=500) => String(v ?? '').trim().slice(0,n);
+const emailOk = v => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+const tokenFor = user => jwt.sign({ sub: String(user.id), email: user.email, role: user.role }, process.env.JWT_SECRET, { expiresIn: '7d', issuer: 'afk-news' });
+function auth(req,res,next){const h=req.get('authorization')||'';const token=h.startsWith('Bearer ')?h.slice(7):'';try{if(!token)throw Error();req.user=jwt.verify(token,process.env.JWT_SECRET,{issuer:'afk-news'});next()}catch{return res.status(401).json({success:false,error:'Connexion requise.'})}}
+function admin(req,res,next){auth(req,res,()=>req.user.role==='admin'?next():res.status(403).json({success:false,error:'Accès administrateur requis.'}))}
+function mailer(){if(!process.env.SMTP_HOST||!process.env.SMTP_USER||!process.env.SMTP_PASS)return null;return nodemailer.createTransport({host:process.env.SMTP_HOST,port:Number(process.env.SMTP_PORT||465),secure:String(process.env.SMTP_SECURE||'true')==='true',auth:{user:process.env.SMTP_USER,pass:process.env.SMTP_PASS}})}
+async function initDb(){
+ await pool.query(`CREATE TABLE IF NOT EXISTS categories(id BIGSERIAL PRIMARY KEY,name TEXT NOT NULL UNIQUE,slug TEXT UNIQUE,created_at TIMESTAMPTZ DEFAULT NOW());
+ CREATE TABLE IF NOT EXISTS articles(id BIGSERIAL PRIMARY KEY,external_id TEXT NOT NULL,title TEXT NOT NULL,summary TEXT,content TEXT,url TEXT NOT NULL,image_url TEXT,source TEXT NOT NULL,original_language TEXT DEFAULT 'en',translated_title TEXT,translated_summary TEXT,category_id BIGINT REFERENCES categories(id),country TEXT,importance INTEGER DEFAULT 3 CHECK(importance BETWEEN 1 AND 5),is_published BOOLEAN DEFAULT TRUE,published_at TIMESTAMPTZ,fetched_at TIMESTAMPTZ DEFAULT NOW(),created_at TIMESTAMPTZ DEFAULT NOW(),UNIQUE(source,external_id));
+ CREATE TABLE IF NOT EXISTS users(id BIGSERIAL PRIMARY KEY,email TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,display_name TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'user' CHECK(role IN('user','admin')),created_at TIMESTAMPTZ DEFAULT NOW());
+ CREATE TABLE IF NOT EXISTS favorites(user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,article_id BIGINT REFERENCES articles(id) ON DELETE CASCADE,created_at TIMESTAMPTZ DEFAULT NOW(),PRIMARY KEY(user_id,article_id));
+ CREATE TABLE IF NOT EXISTS newsletter_subscribers(id BIGSERIAL PRIMARY KEY,email TEXT NOT NULL UNIQUE,is_active BOOLEAN DEFAULT TRUE,created_at TIMESTAMPTZ DEFAULT NOW());
+ CREATE TABLE IF NOT EXISTS afk_announcements(id BIGSERIAL PRIMARY KEY,title TEXT NOT NULL,description TEXT,image_url TEXT,link_url TEXT,announcement_type TEXT DEFAULT 'news',is_published BOOLEAN DEFAULT FALSE,published_at TIMESTAMPTZ,created_at TIMESTAMPTZ DEFAULT NOW(),updated_at TIMESTAMPTZ DEFAULT NOW());
+ CREATE TABLE IF NOT EXISTS refresh_logs(id BIGSERIAL PRIMARY KEY,service TEXT NOT NULL,status TEXT NOT NULL,articles_found INTEGER DEFAULT 0,articles_added INTEGER DEFAULT 0,error_message TEXT,started_at TIMESTAMPTZ DEFAULT NOW(),finished_at TIMESTAMPTZ);`);
+ for(const name of categories) await pool.query('INSERT INTO categories(name,slug) VALUES($1,$2) ON CONFLICT(name) DO UPDATE SET slug=EXCLUDED.slug',[name,slug(name)]);
 }
-
-function categoryOf(title, summary) {
-  const t = `${title||""} ${summary||""}`.toLowerCase();
-  if (/ha.ti|haiti|port-au-prince|cap-ha.tien/.test(t)) return "Haïti";
-  if (/football|soccer|basketball|tennis|sport/.test(t)) return "Sports";
-  if (/artificial intelligence|technology|software|cyber|startup|tech/.test(t)) return "Technologie";
-  if (/econom|business|market|finance/.test(t)) return "Économie";
-  if (/science|research|climate|space/.test(t)) return "Sciences";
-  if (/music|film|movie|culture|art|festival/.test(t)) return "Loisirs & culture";
-  return "Monde";
-}
-
-async function collectArticles() {
-  const started = new Date();
-  let all = [];
-  try {
-    if (process.env.NEWSAPI_KEY) {
-      const u = new URL("https://newsapi.org/v2/top-headlines");
-      u.searchParams.set("country",process.env.NEWS_COUNTRY||"us");
-      u.searchParams.set("pageSize","50"); u.searchParams.set("apiKey",process.env.NEWSAPI_KEY);
-      const r = await fetch(u); if (!r.ok) throw new Error(`NewsAPI HTTP ${r.status}`);
-      const d = await r.json();
-      all.push(...(d.articles||[]).map(a=>({
-        id:a.url||a.title,title:a.title,summary:a.description,content:a.content,
-        url:a.url,image:a.urlToImage,source:"newsapi",lang:"en",date:a.publishedAt
-      })));
-    }
-    if (process.env.GNEWS_API_KEY) {
-      const u = new URL("https://gnews.io/api/v4/top-headlines");
-      u.searchParams.set("lang","en");u.searchParams.set("max","10");u.searchParams.set("apikey",process.env.GNEWS_API_KEY);
-      const r = await fetch(u); if (!r.ok) throw new Error(`GNews HTTP ${r.status}`);
-      const d = await r.json();
-      all.push(...(d.articles||[]).map(a=>({
-        id:a.url||a.title,title:a.title,summary:a.description,content:a.content,
-        url:a.url,image:a.image,source:"gnews",lang:"en",date:a.publishedAt
-      })));
-    }
-    let added=0;
-    for (const a of all) {
-      if (!a.title || !a.url || !a.id) continue;
-      const cat = await pool.query("SELECT id FROM categories WHERE name=$1",[categoryOf(a.title,a.summary)]);
-      const saved = await pool.query(`
-        INSERT INTO articles(external_id,title,summary,content,url,image_url,source,original_language,category_id,country,published_at)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-        ON CONFLICT(source,external_id) DO UPDATE SET
-          title=EXCLUDED.title,summary=EXCLUDED.summary,image_url=EXCLUDED.image_url,fetched_at=NOW()
-        RETURNING (xmax=0) AS inserted`,
-        [String(a.id).slice(0,1000),a.title,a.summary,a.content,a.url,a.image,a.source,a.lang,
-         cat.rows[0]?.id||null,process.env.NEWS_COUNTRY||null,a.date?new Date(a.date):null]);
-      if(saved.rows[0]?.inserted) added++;
-    }
-    await pool.query(`INSERT INTO refresh_logs(service,status,articles_found,articles_added,started_at,finished_at)
-      VALUES('news-providers','success',$1,$2,$3,NOW())`,[all.length,added,started]);
-    console.log(`Collecte terminée : ${all.length} trouvés, ${added} nouveaux.`);
-    return {found:all.length,added};
-  } catch(e) {
-    await pool.query(`INSERT INTO refresh_logs(service,status,error_message,started_at,finished_at)
-      VALUES('news-providers','error',$1,$2,NOW())`,[e.message.slice(0,1500),started]).catch(()=>{});
-    console.error("Collecte actualités :",e.message);
-    return {error:e.message};
-  }
-}
-
-app.get("/",(_req,res)=>res.json({name:"AFK News API",status:"online"}));
-app.get("/api/health",async(_req,res)=>{
-  try { await pool.query("SELECT 1");res.json({success:true,api:"online",database:"connected"}); }
-  catch(e){res.status(503).json({success:false,api:"online",database:"disconnected"});}
-});
-app.get("/api/categories",async(_req,res)=>{
-  try {const r=await pool.query("SELECT id,name,slug FROM categories ORDER BY id");res.json({success:true,data:r.rows});}
-  catch(e){res.status(500).json({success:false,error:"Erreur de lecture des catégories."});}
-});
-app.get("/api/articles",async(req,res)=>{
-  try {
-    const page=Math.max(1,parseInt(req.query.page,10)||1);
-    const limit=Math.min(50,Math.max(1,parseInt(req.query.limit,10)||12));
-    const vals=[];let where="WHERE a.is_published=TRUE";
-    if(req.query.category){vals.push(String(req.query.category));where+=` AND c.slug=$${vals.length}`;}
-    if(req.query.q){vals.push(`%${String(req.query.q).slice(0,120)}%`);where+=` AND (a.title ILIKE $${vals.length} OR a.summary ILIKE $${vals.length})`;}
-    const count=await pool.query(`SELECT COUNT(*)::int total FROM articles a LEFT JOIN categories c ON c.id=a.category_id ${where}`,vals);
-    vals.push(limit,(page-1)*limit);
-    const data=await pool.query(`SELECT a.id,a.title,a.summary,a.url,a.image_url,a.source,
-      a.original_language,a.translated_title,a.translated_summary,a.country,a.importance,
-      a.published_at,c.name category FROM articles a LEFT JOIN categories c ON c.id=a.category_id
-      ${where} ORDER BY a.published_at DESC NULLS LAST,a.created_at DESC
-      LIMIT $${vals.length-1} OFFSET $${vals.length}`,vals);
-    res.json({success:true,page,limit,total:count.rows[0].total,data:data.rows});
-  } catch(e){res.status(500).json({success:false,error:"Erreur de lecture des actualités."});}
-});
-app.get("/api/announcements",async(_req,res)=>{
-  try {const r=await pool.query(`SELECT id,title,description,image_url,link_url,announcement_type,published_at
-    FROM afk_announcements WHERE is_published=TRUE ORDER BY published_at DESC NULLS LAST LIMIT 30`);
-    res.json({success:true,data:r.rows});}
-  catch(e){res.status(500).json({success:false,error:"Erreur de lecture des annonces."});}
-});
-app.post("/api/admin/refresh-news",async(req,res)=>{
-  if(!process.env.ADMIN_REFRESH_TOKEN||req.get("x-admin-token")!==process.env.ADMIN_REFRESH_TOKEN)
-    return res.status(401).json({success:false,error:"Non autorisé."});
-  res.json({success:true,...await collectArticles()});
-});
-
-async function start(){
-  if(!process.env.DATABASE_URL){console.error("DATABASE_URL absent des variables Render.");process.exit(1);}
-  await initDb();
-  app.listen(PORT,()=>console.log(`AFK News API active sur ${PORT}`));
-  if(process.env.NEWSAPI_KEY||process.env.GNEWS_API_KEY){
-    collectArticles();
-    const minutes=Math.max(15,Number(process.env.NEWS_REFRESH_MINUTES||30));
-    setInterval(collectArticles,minutes*60*1000);
-    console.log(`Collecte planifiée toutes les ${minutes} minutes.`);
-  } else console.log("Aucune clé d'actualité : collecte non activée.");
-}
-process.on("SIGTERM",async()=>{await pool.end();process.exit(0);});
-start().catch(e=>{console.error("Démarrage impossible :",e);process.exit(1);});
+function categoryOf(title,summary){const t=`${title||''} ${summary||''}`.toLowerCase();if(/ha.ti|haiti|port-au-prince|cap-ha.tien/.test(t))return 'Haïti';if(/earthquake|tsunami|hurricane|cyclone|flood|wildfire|emergency|alert/.test(t))return 'Alertes';if(/football|soccer|basketball|tennis|sport/.test(t))return 'Sports';if(/artificial intelligence|technology|software|cyber|startup|tech/.test(t))return 'Technologie';if(/econom|business|market|finance/.test(t))return 'Économie';if(/science|research|climate|space/.test(t))return 'Sciences';if(/music|film|movie|culture|art|festival/.test(t))return 'Loisirs & culture';return 'Monde'}
+async function fetchProvider(name,url){try{const r=await fetch(url,{signal:AbortSignal.timeout(15000)});if(!r.ok)throw Error(`${name} HTTP ${r.status}`);const d=await r.json();return (d.articles||[]).map(a=>({id:a.url||a.title,title:a.title,summary:a.description,content:a.content,url:a.url,image:a.urlToImage||a.image,source:name,lang:'en',date:a.publishedAt}));}catch(e){console.error(`${name}:`,e.message);return []}}
+async function collectArticles(){const started=new Date();let all=[];if(process.env.NEWSAPI_KEY){const u=new URL('https://newsapi.org/v2/top-headlines');u.searchParams.set('country',process.env.NEWS_COUNTRY||'us');u.searchParams.set('pageSize','50');u.searchParams.set('apiKey',process.env.NEWSAPI_KEY);all.push(...await fetchProvider('newsapi',u));}if(process.env.GNEWS_API_KEY){const u=new URL('https://gnews.io/api/v4/top-headlines');u.searchParams.set('lang',process.env.GNEWS_LANGUAGE||'en');u.searchParams.set('max','10');u.searchParams.set('apikey',process.env.GNEWS_API_KEY);all.push(...await fetchProvider('gnews',u));}
+ let added=0;for(const a of all){if(!a.title||!a.url||!a.id)continue;const c=await pool.query('SELECT id FROM categories WHERE name=$1',[categoryOf(a.title,a.summary)]);const r=await pool.query(`INSERT INTO articles(external_id,title,summary,content,url,image_url,source,original_language,category_id,country,published_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(source,external_id) DO UPDATE SET title=EXCLUDED.title,summary=EXCLUDED.summary,image_url=EXCLUDED.image_url,fetched_at=NOW() RETURNING (xmax=0) inserted`,[String(a.id).slice(0,1000),a.title,a.summary,a.content,a.url,a.image,a.source,a.lang,c.rows[0]?.id||null,process.env.NEWS_COUNTRY||null,a.date?new Date(a.date):null]);if(r.rows[0]?.inserted)added++;}
+ await pool.query(`INSERT INTO refresh_logs(service,status,articles_found,articles_added,started_at,finished_at) VALUES('news-providers',$1,$2,$3,$4,NOW())`,[all.length?'success':'empty',all.length,added,started]);return{found:all.length,added};}
+app.get('/',(_q,r)=>r.json({name:'AFK News API',status:'online',version:'2.0'}));
+app.get('/api/health',async(_q,r)=>{try{await pool.query('SELECT 1');r.json({success:true,api:'online',database:'connected',mail:!!mailer()})}catch{r.status(503).json({success:false,api:'online',database:'disconnected'})}});
+app.get('/api/categories',async(_q,r)=>{const x=await pool.query('SELECT id,name,slug FROM categories ORDER BY id');r.json({success:true,data:x.rows})});
+app.get('/api/articles',async(req,res)=>{try{const page=Math.max(1,parseInt(req.query.page)||1),limit=Math.min(50,Math.max(1,parseInt(req.query.limit)||12)),v=[];let w='WHERE a.is_published=TRUE';if(req.query.category){v.push(clean(req.query.category,80));w+=` AND c.slug=$${v.length}`}if(req.query.q){v.push(`%${clean(req.query.q,120)}%`);w+=` AND (a.title ILIKE $${v.length} OR a.summary ILIKE $${v.length} OR a.translated_title ILIKE $${v.length})`}const count=await pool.query(`SELECT COUNT(*)::int total FROM articles a LEFT JOIN categories c ON c.id=a.category_id ${w}`,v);v.push(limit,(page-1)*limit);const data=await pool.query(`SELECT a.id,a.title,a.summary,a.url,a.image_url,a.source,a.original_language,a.translated_title,a.translated_summary,a.country,a.importance,a.published_at,c.name category FROM articles a LEFT JOIN categories c ON c.id=a.category_id ${w} ORDER BY a.published_at DESC NULLS LAST,a.created_at DESC LIMIT $${v.length-1} OFFSET $${v.length}`,v);res.json({success:true,page,limit,total:count.rows[0].total,data:data.rows})}catch(e){console.error(e);res.status(500).json({success:false,error:'Erreur de lecture des actualités.'})}});
+app.get('/api/announcements',async(_q,r)=>{const x=await pool.query('SELECT id,title,description,image_url,link_url,announcement_type,published_at FROM afk_announcements WHERE is_published=TRUE ORDER BY published_at DESC NULLS LAST LIMIT 30');r.json({success:true,data:x.rows})});
+app.post('/api/auth/register',async(req,res)=>{try{const email=clean(req.body.email,254).toLowerCase(),name=clean(req.body.name,80),password=String(req.body.password||'');if(!emailOk(email)||name.length<2||password.length<10)return res.status(400).json({success:false,error:'Nom, email valide et mot de passe de 10 caractères minimum requis.'});const hash=await bcrypt.hash(password,12);const x=await pool.query('INSERT INTO users(email,password_hash,display_name) VALUES($1,$2,$3) RETURNING id,email,display_name,role',[email,hash,name]);const user=x.rows[0];res.status(201).json({success:true,token:tokenFor(user),user:{id:user.id,email:user.email,name:user.display_name,role:user.role}})}catch(e){res.status(e.code==='23505'?409:500).json({success:false,error:e.code==='23505'?'Cette adresse email possède déjà un compte.':'Création du compte impossible.'})}});
+app.post('/api/auth/login',async(req,res)=>{const email=clean(req.body.email,254).toLowerCase(),password=String(req.body.password||'');let user;if(process.env.ADMIN_EMAIL&&process.env.ADMIN_PASSWORD&&email===process.env.ADMIN_EMAIL.toLowerCase()&&password===process.env.ADMIN_PASSWORD){user={id:'admin-env',email,display_name:'Administrateur AFK',role:'admin'}}else{const x=await pool.query('SELECT id,email,password_hash,display_name,role FROM users WHERE email=$1',[email]);user=x.rows[0];if(!user||!(await bcrypt.compare(password,user.password_hash)))return res.status(401).json({success:false,error:'Email ou mot de passe incorrect.'})}res.json({success:true,token:tokenFor(user),user:{id:user.id,email:user.email,name:user.display_name,role:user.role}})});
+app.get('/api/auth/me',auth,async(req,res)=>{if(req.user.sub==='admin-env')return res.json({success:true,user:{email:req.user.email,name:'Administrateur AFK',role:'admin'}});const x=await pool.query('SELECT id,email,display_name,role FROM users WHERE id=$1',[req.user.sub]);if(!x.rows[0])return res.status(401).json({success:false,error:'Compte introuvable.'});const u=x.rows[0];res.json({success:true,user:{id:u.id,email:u.email,name:u.display_name,role:u.role}})});
+app.get('/api/favorites',auth,async(req,res)=>{if(req.user.sub==='admin-env')return res.json({success:true,data:[]});const x=await pool.query(`SELECT a.id,a.title,a.summary,a.url,a.image_url,a.source,a.published_at,c.name category FROM favorites f JOIN articles a ON a.id=f.article_id LEFT JOIN categories c ON c.id=a.category_id WHERE f.user_id=$1 ORDER BY f.created_at DESC`,[req.user.sub]);res.json({success:true,data:x.rows})});
+app.post('/api/favorites/:articleId',auth,async(req,res)=>{if(req.user.sub==='admin-env')return res.status(400).json({success:false,error:'Compte administrateur sans favoris.'});const id=Number(req.params.articleId);if(!Number.isSafeInteger(id)||id<1)return res.status(400).json({success:false,error:'Article invalide.'});try{await pool.query('INSERT INTO favorites(user_id,article_id) VALUES($1,$2) ON CONFLICT DO NOTHING',[req.user.sub,id]);res.json({success:true,saved:true})}catch(e){res.status(404).json({success:false,error:'Article introuvable.'})}});
+app.delete('/api/favorites/:articleId',auth,async(req,res)=>{await pool.query('DELETE FROM favorites WHERE user_id=$1 AND article_id=$2',[req.user.sub,Number(req.params.articleId)]);res.json({success:true,saved:false})});
+app.post('/api/newsletter',async(req,res)=>{const email=clean(req.body.email,254).toLowerCase();if(!emailOk(email))return res.status(400).json({success:false,error:'Adresse email invalide.'});try{await pool.query('INSERT INTO newsletter_subscribers(email) VALUES($1) ON CONFLICT(email) DO UPDATE SET is_active=TRUE',[email]);const transport=mailer();if(transport&&process.env.MAIL_FROM){await transport.sendMail({from:`${process.env.MAIL_FROM_NAME||'AFK News'} <${process.env.MAIL_FROM}>`,to:email,subject:'Bienvenue dans la newsletter AFK News',text:'Votre inscription à la newsletter AFK News est confirmée.'})}res.status(201).json({success:true,message:'Inscription enregistrée.'})}catch(e){console.error('Newsletter:',e.message);res.status(500).json({success:false,error:'Inscription enregistrée impossible pour le moment.'})}});
+app.post('/api/newsletter/unsubscribe',async(req,res)=>{const email=clean(req.body.email,254).toLowerCase();await pool.query('UPDATE newsletter_subscribers SET is_active=FALSE WHERE email=$1',[email]);res.json({success:true})});
+app.post('/api/admin/refresh-news',admin,async(_q,r)=>{try{r.json({success:true,...await collectArticles()})}catch(e){r.status(500).json({success:false,error:e.message})}});
+app.get('/api/admin/stats',admin,async(_q,r)=>{const [users,articles,subs]=await Promise.all([pool.query('SELECT COUNT(*)::int n FROM users'),pool.query('SELECT COUNT(*)::int n FROM articles'),pool.query('SELECT COUNT(*)::int n FROM newsletter_subscribers WHERE is_active')]);r.json({success:true,users:users.rows[0].n,articles:articles.rows[0].n,subscribers:subs.rows[0].n})});
+app.post('/api/admin/announcements',admin,async(req,res)=>{const title=clean(req.body.title,180),description=clean(req.body.description,2000),image=clean(req.body.image_url,1000),link=clean(req.body.link_url,1000),type=clean(req.body.announcement_type,40)||'news';if(title.length<3)return res.status(400).json({success:false,error:'Titre trop court.'});const x=await pool.query(`INSERT INTO afk_announcements(title,description,image_url,link_url,announcement_type,is_published,published_at) VALUES($1,$2,$3,$4,$5,TRUE,NOW()) RETURNING *`,[title,description,image,link,type]);res.status(201).json({success:true,data:x.rows[0]})});
+app.delete('/api/admin/announcements/:id',admin,async(req,res)=>{await pool.query('DELETE FROM afk_announcements WHERE id=$1',[Number(req.params.id)]);res.json({success:true})});
+app.use((err,_req,res,_next)=>{console.error(err.message);res.status(500).json({success:false,error:'Erreur serveur.'})});
+async function start(){await initDb();app.listen(PORT,()=>console.log(`AFK News API active sur ${PORT}`));if(process.env.NEWSAPI_KEY||process.env.GNEWS_API_KEY){collectArticles().catch(console.error);const mins=Math.max(15,Number(process.env.NEWS_REFRESH_MINUTES||30));setInterval(()=>collectArticles().catch(console.error),mins*60000);console.log(`Actualités : toutes les ${mins} minutes si le service reste actif.`)}else console.log('Aucune clé NewsAPI/GNews : ajoute au moins une clé Render.');}
+process.on('SIGTERM',async()=>{await pool.end();process.exit(0)});start().catch(e=>{console.error('Démarrage impossible:',e);process.exit(1)});
