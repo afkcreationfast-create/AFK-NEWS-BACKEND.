@@ -29,57 +29,6 @@ function auth(req,res,next){const h=req.get('authorization')||'';const token=h.s
 function admin(req,res,next){auth(req,res,()=>req.user.role==='admin'?next():res.status(403).json({success:false,error:'Accès administrateur requis.'}))}
 function resendClient(){if(!process.env.RESEND_API_KEY)return null;return new Resend(process.env.RESEND_API_KEY)}
 function mailReady(){return Boolean(process.env.RESEND_API_KEY && process.env.MAIL_FROM)}
-
-function emailLayout(title, body) {
- const safeTitle = clean(title, 140);
- return `<div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:28px;color:#172033;background:#ffffff"><div style="border-bottom:3px solid #f0b84b;padding-bottom:14px"><strong style="font-size:20px;color:#123b46">AFK News</strong></div><h1 style="color:#2563eb;font-size:25px">${safeTitle}</h1>${body}<p style="margin-top:28px;color:#64748b;font-size:13px">L'équipe AFK News</p></div>`;
-}
-async function sendAccountEmail(to, subject, text, html) {
- if (!mailReady()) throw new Error('RESEND_API_KEY ou MAIL_FROM manquant');
- const client = resendClient();
- const fromName = clean(process.env.MAIL_FROM_NAME || 'AFK News', 80);
- const fromAddress = clean(process.env.MAIL_FROM, 254);
- const result = await client.emails.send({from:`${fromName} <${fromAddress}>`,to,subject,text,html});
- if (result && result.error) throw new Error(result.error.message || 'Erreur Resend inconnue');
- return result?.data || null;
-}
-function htmlSafe(value) {
- return String(value || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
-async function sendMemberWelcomeEmail(to, name) {
- const displayName = clean(name || 'membre AFK News', 80);
- const text = `Bonjour ${displayName},\\n\\nBienvenue sur AFK News ! Ton compte a bien été créé. Tu peux maintenant te connecter, enregistrer tes articles favoris et suivre les actualités.\\n\\nMerci de faire partie de notre communauté !\\n\\nL'équipe AFK News`;
- const html = emailLayout('Bienvenue dans la communauté !',`<p>Bonjour <strong>${htmlSafe(displayName)}</strong>,</p><p>Ton compte AFK News a bien été créé. Nous sommes heureux de te compter parmi nos membres.</p><p>Tu peux maintenant te connecter, enregistrer tes articles favoris et suivre les actualités.</p><p>Merci de faire partie de notre communauté !</p>`);
- return sendAccountEmail(to,'Bienvenue dans la communauté AFK News !',text,html);
-}
-function describeDevice(userAgent) {
- const ua = String(userAgent || '');
- let device = 'Appareil non identifié';
- if (/Android/i.test(ua)) device = 'Android';
- else if (/iPhone|iPod/i.test(ua)) device = 'iPhone';
- else if (/iPad/i.test(ua)) device = 'iPad';
- else if (/Windows/i.test(ua)) device = 'Windows';
- else if (/Macintosh|Mac OS/i.test(ua)) device = 'Mac';
- else if (/Linux/i.test(ua)) device = 'Linux';
- let browser = 'Navigateur non identifié';
- if (/Edg\\//i.test(ua)) browser = 'Microsoft Edge';
- else if (/Firefox\\//i.test(ua)) browser = 'Firefox';
- else if (/Chrome\\//i.test(ua)) browser = 'Chrome';
- else if (/Safari\\//i.test(ua) && !/Chrome\\//i.test(ua)) browser = 'Safari';
- return {device,browser};
-}
-async function sendLoginAlertEmail(to, name, userAgent) {
- const {device,browser} = describeDevice(userAgent);
- const date = new Intl.DateTimeFormat('fr-FR',{timeZone:'America/Port-au-Prince',dateStyle:'long',timeStyle:'short'}).format(new Date());
- const displayName = clean(name || 'membre AFK News',80);
- const text = `Bonjour ${displayName},\\n\\nUne connexion à ton compte AFK News vient d'être détectée.\\nAppareil : ${device}\\nNavigateur : ${browser}\\nDate et heure (Haïti) : ${date}\\n\\nSi tu es à l'origine de cette connexion, tu n'as rien à faire. Si tu ne reconnais pas cette activité, change ton mot de passe.\\n\\nL'équipe AFK News`;
- const html = emailLayout('Nouvelle connexion à ton compte',`<p>Bonjour <strong>${htmlSafe(displayName)}</strong>,</p><p>Une connexion à ton compte AFK News vient d'être détectée.</p><div style="background:#f1f5f9;padding:16px;border-radius:10px"><p><strong>Appareil :</strong> ${device}</p><p><strong>Navigateur :</strong> ${browser}</p><p><strong>Date et heure (Haïti) :</strong> ${date}</p></div><p>Si tu es à l'origine de cette connexion, tu n'as rien à faire. Si tu ne reconnais pas cette activité, change ton mot de passe.</p>`);
- return sendAccountEmail(to,'Nouvelle connexion à ton compte AFK News',text,html);
-}
-async function sendAccountNoticeSafely(kind, callback) {
- try { await callback(); console.log(`Email compte (${kind}) envoyé.`); }
- catch (e) { console.error(`Email compte (${kind}) non envoyé:`,e.message); }
-}
 async function sendWelcomeEmail(to){const client=resendClient();if(!client||!process.env.MAIL_FROM)throw new Error('RESEND_API_KEY ou MAIL_FROM manquant');const fromName=clean(process.env.MAIL_FROM_NAME||'AFK News',80);const fromAddress=clean(process.env.MAIL_FROM,254);const result=await client.emails.send({from:`${fromName} <${fromAddress}>`,to,subject:'Bienvenue dans la newsletter AFK News',text:'Votre inscription à la newsletter AFK News est confirmée. Merci de nous suivre !',html:'<div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:24px;color:#172033"><h1 style="color:#2563eb">Bienvenue sur AFK News !</h1><p>Votre inscription à la newsletter AFK News est confirmée.</p><p>Merci de nous suivre et de rester informé.</p></div>'});if(result && result.error)throw new Error(result.error.message||'Erreur Resend inconnue');return result?.data||null}
 async function initDb(){
  await pool.query(`CREATE TABLE IF NOT EXISTS categories(id BIGSERIAL PRIMARY KEY,name TEXT NOT NULL UNIQUE,slug TEXT UNIQUE,created_at TIMESTAMPTZ DEFAULT NOW());
@@ -101,8 +50,8 @@ app.get('/api/health',async(_q,r)=>{try{await pool.query('SELECT 1');r.json({suc
 app.get('/api/categories',async(_q,r)=>{const x=await pool.query('SELECT id,name,slug FROM categories ORDER BY id');r.json({success:true,data:x.rows})});
 app.get('/api/articles',async(req,res)=>{try{const page=Math.max(1,parseInt(req.query.page)||1),limit=Math.min(50,Math.max(1,parseInt(req.query.limit)||12)),v=[];let w='WHERE a.is_published=TRUE';if(req.query.category){v.push(clean(req.query.category,80));w+=` AND c.slug=$${v.length}`}if(req.query.q){v.push(`%${clean(req.query.q,120)}%`);w+=` AND (a.title ILIKE $${v.length} OR a.summary ILIKE $${v.length} OR a.translated_title ILIKE $${v.length})`}const count=await pool.query(`SELECT COUNT(*)::int total FROM articles a LEFT JOIN categories c ON c.id=a.category_id ${w}`,v);v.push(limit,(page-1)*limit);const data=await pool.query(`SELECT a.id,a.title,a.summary,a.url,a.image_url,a.source,a.original_language,a.translated_title,a.translated_summary,a.country,a.importance,a.published_at,c.name category FROM articles a LEFT JOIN categories c ON c.id=a.category_id ${w} ORDER BY a.published_at DESC NULLS LAST,a.created_at DESC LIMIT $${v.length-1} OFFSET $${v.length}`,v);res.json({success:true,page,limit,total:count.rows[0].total,data:data.rows})}catch(e){console.error(e);res.status(500).json({success:false,error:'Erreur de lecture des actualités.'})}});
 app.get('/api/announcements',async(_q,r)=>{const x=await pool.query('SELECT id,title,description,image_url,link_url,announcement_type,published_at FROM afk_announcements WHERE is_published=TRUE ORDER BY published_at DESC NULLS LAST LIMIT 30');r.json({success:true,data:x.rows})});
-app.post('/api/auth/register',async(req,res)=>{try{const email=clean(req.body.email,254).toLowerCase(),name=clean(req.body.name,80),password=String(req.body.password||'');if(!emailOk(email)||name.length<2||password.length<10)return res.status(400).json({success:false,error:'Nom, email valide et mot de passe de 10 caractères minimum requis.'});const hash=await bcrypt.hash(password,12);const x=await pool.query('INSERT INTO users(email,password_hash,display_name) VALUES($1,$2,$3) RETURNING id,email,display_name,role',[email,hash,name]);const user=x.rows[0];await sendAccountNoticeSafely('bienvenue',()=>sendMemberWelcomeEmail(user.email,user.display_name));res.status(201).json({success:true,token:tokenFor(user),user:{id:user.id,email:user.email,name:user.display_name,role:user.role}})}catch(e){res.status(e.code==='23505'?409:500).json({success:false,error:e.code==='23505'?'Cette adresse email possède déjà un compte.':'Création du compte impossible.'})}});
-app.post('/api/auth/login',async(req,res)=>{const email=clean(req.body.email,254).toLowerCase(),password=String(req.body.password||'');let user;if(process.env.ADMIN_EMAIL&&process.env.ADMIN_PASSWORD&&email===process.env.ADMIN_EMAIL.toLowerCase()&&password===process.env.ADMIN_PASSWORD){user={id:'admin-env',email,display_name:'Administrateur AFK',role:'admin'}}else{const x=await pool.query('SELECT id,email,password_hash,display_name,role FROM users WHERE email=$1',[email]);user=x.rows[0];if(!user||!(await bcrypt.compare(password,user.password_hash)))return res.status(401).json({success:false,error:'Email ou mot de passe incorrect.'})}await sendAccountNoticeSafely('connexion',()=>sendLoginAlertEmail(user.email,user.display_name,req.get('user-agent')));res.json({success:true,token:tokenFor(user),user:{id:user.id,email:user.email,name:user.display_name,role:user.role}})});
+app.post('/api/auth/register',async(req,res)=>{try{const email=clean(req.body.email,254).toLowerCase(),name=clean(req.body.name,80),password=String(req.body.password||'');if(!emailOk(email)||name.length<2||password.length<10)return res.status(400).json({success:false,error:'Nom, email valide et mot de passe de 10 caractères minimum requis.'});const hash=await bcrypt.hash(password,12);const x=await pool.query('INSERT INTO users(email,password_hash,display_name) VALUES($1,$2,$3) RETURNING id,email,display_name,role',[email,hash,name]);const user=x.rows[0];res.status(201).json({success:true,token:tokenFor(user),user:{id:user.id,email:user.email,name:user.display_name,role:user.role}})}catch(e){res.status(e.code==='23505'?409:500).json({success:false,error:e.code==='23505'?'Cette adresse email possède déjà un compte.':'Création du compte impossible.'})}});
+app.post('/api/auth/login',async(req,res)=>{const email=clean(req.body.email,254).toLowerCase(),password=String(req.body.password||'');let user;if(process.env.ADMIN_EMAIL&&process.env.ADMIN_PASSWORD&&email===process.env.ADMIN_EMAIL.toLowerCase()&&password===process.env.ADMIN_PASSWORD){user={id:'admin-env',email,display_name:'Administrateur AFK',role:'admin'}}else{const x=await pool.query('SELECT id,email,password_hash,display_name,role FROM users WHERE email=$1',[email]);user=x.rows[0];if(!user||!(await bcrypt.compare(password,user.password_hash)))return res.status(401).json({success:false,error:'Email ou mot de passe incorrect.'})}res.json({success:true,token:tokenFor(user),user:{id:user.id,email:user.email,name:user.display_name,role:user.role}})});
 app.get('/api/auth/me',auth,async(req,res)=>{if(req.user.sub==='admin-env')return res.json({success:true,user:{email:req.user.email,name:'Administrateur AFK',role:'admin'}});const x=await pool.query('SELECT id,email,display_name,role FROM users WHERE id=$1',[req.user.sub]);if(!x.rows[0])return res.status(401).json({success:false,error:'Compte introuvable.'});const u=x.rows[0];res.json({success:true,user:{id:u.id,email:u.email,name:u.display_name,role:u.role}})});
 app.get('/api/favorites',auth,async(req,res)=>{if(req.user.sub==='admin-env')return res.json({success:true,data:[]});const x=await pool.query(`SELECT a.id,a.title,a.summary,a.url,a.image_url,a.source,a.published_at,c.name category FROM favorites f JOIN articles a ON a.id=f.article_id LEFT JOIN categories c ON c.id=a.category_id WHERE f.user_id=$1 ORDER BY f.created_at DESC`,[req.user.sub]);res.json({success:true,data:x.rows})});
 app.post('/api/favorites/:articleId',auth,async(req,res)=>{if(req.user.sub==='admin-env')return res.status(400).json({success:false,error:'Compte administrateur sans favoris.'});const id=Number(req.params.articleId);if(!Number.isSafeInteger(id)||id<1)return res.status(400).json({success:false,error:'Article invalide.'});try{await pool.query('INSERT INTO favorites(user_id,article_id) VALUES($1,$2) ON CONFLICT DO NOTHING',[req.user.sub,id]);res.json({success:true,saved:true})}catch(e){res.status(404).json({success:false,error:'Article introuvable.'})}});
